@@ -29,7 +29,7 @@ def run_dummy_server():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# Background thread mein server start kar rahe hain
+# Background thread mein server start kar rahe hain taaki Render ka port requirement poora ho
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- DATABASE SETUP ---
@@ -65,8 +65,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"👋 Namaste {user.first_name}!\n\n"
-        "📄 **NEET Smart Quiz Bot** tyaar hai!\n"
-        "Aap mujhe koi bhi PDF file bhejein, aur phir `/quiz` type karke ek-ek karke sawal hal karein!\n\n"
+        "📄 **NEET Inline Quiz Bot** tyaar hai!\n"
+        "Aap mujhe koi bhi PDF file bhejein, aur phir `/quiz` type karke buttons ke zariye ek-ek sawal hal karein!\n\n"
         "🚀 /quiz - Test shuru karein\n"
         "📊 /stats - Apni performance dekhein"
     )
@@ -106,7 +106,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 extracted_q[i] = {
                     "question": f"📖 Q{i}. {q_text}",
                     "options": [opt.strip() for opt in options],
-                    "correct": 0,  
+                    "correct": 0,  # Default correct option index (0 = A)
                     "explanation": "💡 NCERT based conceptual solution."
                 }
                 
@@ -130,8 +130,9 @@ async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_progress[user_id] = 1
     await send_question(update.effective_chat.id, user_id, context)
 
+# Question bhejne ka function (Inline Buttons ke sath)
 async def send_question(chat_id, user_id, context):
-    q_index = user_progress[user_id]
+    q_index = user_progress.get(user_id, 1)
     
     if q_index > len(DYNAMIC_QUESTIONS):
         await context.bot.send_message(chat_id=chat_id, text="🎉 Test samaapt hua! Apni performance dekhne ke liye /stats type karein.")
@@ -151,6 +152,7 @@ async def send_question(chat_id, user_id, context):
         reply_markup=reply_markup
     )
 
+# Button click handle karne ke liye (Answer check + Scoring)
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -164,6 +166,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     correct_option = q_data["correct"]
     is_correct = (selected_option == correct_option)
     
+    # Database update (+4 / -1 marking)
     conn = sqlite3.connect('neet_bot.db')
     cursor = conn.cursor()
     cursor.execute('SELECT score, attempted, correct, incorrect FROM users WHERE user_id = ?', (user_id,))
@@ -187,11 +190,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
     conn.close()
     
+    # Purane message par result dikhayein
     await query.edit_message_text(text=f"{query.message.text}\n\n{result_text}\n{q_data['explanation']}")
     
+    # Agle question par move karein
     user_progress[user_id] = q_index + 1
     await send_question(query.message.chat_id, user_id, context)
 
+# Stats Command
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('neet_bot.db')
@@ -228,5 +234,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("✨ Clean NEET Quiz Bot successfully run ho raha hai!")
+    print("✨ Inline Quiz Bot successfully run ho raha hai!")
     app.run_polling()
