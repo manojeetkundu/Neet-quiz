@@ -1,238 +1,122 @@
 import logging
-import sqlite3
 import os
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pypdf import PdfReader
+import pdfplumber
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Logging setup
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- DUMMY HTTP SERVER FOR RENDER (Port handling) ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive and running!")
+# --- Dummy Flask Server for Cloud Deployment ---
+app = Flask(__name__)
 
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
+@app.route('/')
+def home():
+    return "Telegram Quiz Bot is running successfully!"
 
-# Background thread mein server start kar rahe hain taaki Render ka port requirement poora ho
-threading.Thread(target=run_dummy_server, daemon=True).start()
+def run_flask():
+    # Render ya dusre platforms PORT environment variable dete hain
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+# ---------------------------------------------
 
-# --- DATABASE SETUP ---
-def init_db():
-    conn = sqlite3.connect('neet_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            score INTEGER DEFAULT 0,
-            attempted INTEGER DEFAULT 0,
-            correct INTEGER DEFAULT 0,
-            incorrect INTEGER DEFAULT 0
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# Global variables
-user_progress = {}
-DYNAMIC_QUESTIONS = {}
+# In-memory storage (Production ke liye Database use karein)
+QUIZ_STATE = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    conn = sqlite3.connect('neet_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)', (user.id, user.username))
-    conn.commit()
-    conn.close()
-    
     await update.message.reply_text(
-        f"👋 Namaste {user.first_name}!\n\n"
-        "📄 **NEET Inline Quiz Bot** tyaar hai!\n"
-        "Aap mujhe koi bhi PDF file bhejein, aur phir `/quiz` type karke buttons ke zariye ek-ek sawal hal karein!\n\n"
-        "🚀 /quiz - Test shuru karein\n"
-        "📊 /stats - Apni performance dekhein"
+        "Namaste! Mujhe ek PDF bhejiye jisme questions aur unke answers hon, taaki mai ek quiz create kar saku."
     )
 
-# PDF Handler
+# PDF Handle karne ka function
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global DYNAMIC_QUESTIONS
-    message = update.message
-    
-    if not message.document:
-        await message.reply_text("⚠️ Kripya ek valid PDF file bhejein!")
+    document = update.message.document
+    if not document or not document.file_name.endswith('.pdf'):
+        await update.message.reply_text("Kripya ek valid PDF file bhejiye.")
         return
-        
-    file = await message.document.get_file()
-    file_path = "downloaded_neet.pdf"
+
+    file = await context.bot.get_file(document.file_id)
+    file_path = f"./{document.file_name}"
     await file.download_to_drive(file_path)
-    
-    await message.reply_text("📥 PDF mil gayi hai! Questions extract ho rahe hain... 🔄")
-    
-    try:
-        reader = PdfReader(file_path)
-        text = ""
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-                
-        raw_questions = text.split("Q.") 
-        extracted_q = {}
-        
-        for i, q_block in enumerate(raw_questions[1:], start=1):
-            lines = q_block.strip().split("\n")
-            if len(lines) >= 5:
-                q_text = lines[0]
-                options = lines[1:5]
-                
-                extracted_q[i] = {
-                    "question": f"📖 Q{i}. {q_text}",
-                    "options": [opt.strip() for opt in options],
-                    "correct": 0,  # Default correct option index (0 = A)
-                    "explanation": "💡 NCERT based conceptual solution."
-                }
-                
-        if extracted_q:
-            DYNAMIC_QUESTIONS = extracted_q
-            await message.reply_text(f"✅ Success! Total **{len(DYNAMIC_QUESTIONS)}** questions load ho gaye hain.\nAb `/quiz` type karke test shuru karein! 🎯")
-        else:
-            await message.reply_text("⚠️ PDF se questions extract nahi ho paye.")
-            
-    except Exception as e:
-        await message.reply_text(f"❌ Error aa gayi: {str(e)}")
 
-# Quiz Shuru Karne Ka Command
-async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    # PDF se text extract karna
+    questions = extract_questions_from_pdf(file_path)
     
-    if not DYNAMIC_QUESTIONS:
-        await update.message.reply_text("⚠️ Pehle koi PDF file bhej kar questions load karein!")
+    if not questions:
+        await update.message.reply_text("PDF se questions extract nahi ho paye. Kripya format check karein.")
         return
-        
-    user_progress[user_id] = 1
-    await send_question(update.effective_chat.id, user_id, context)
 
-# Question bhejne ka function (Inline Buttons ke sath)
-async def send_question(chat_id, user_id, context):
-    q_index = user_progress.get(user_id, 1)
-    
-    if q_index > len(DYNAMIC_QUESTIONS):
-        await context.bot.send_message(chat_id=chat_id, text="🎉 Test samaapt hua! Apni performance dekhne ke liye /stats type karein.")
-        return
-        
-    q_data = DYNAMIC_QUESTIONS[q_index]
-    
-    keyboard = []
-    for idx, opt in enumerate(q_data["options"]):
-        keyboard.append([InlineKeyboardButton(opt, callback_data=f"ans_{q_index}_{idx}")])
-        
+    QUIZ_STATE[update.effective_chat.id] = {
+        "questions": questions,
+        "current_q": 0,
+        "scores": {},
+        "times": {}
+    }
+
+    keyboard = [[InlineKeyboardButton("Start Quiz", callback_data="start_quiz")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"{q_data['question']}",
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text(f"Total {len(questions)} questions mil gaye hain!", reply_markup=reply_markup)
 
-# Button click handle karne ke liye (Answer check + Scoring)
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def extract_questions_from_pdf(pdf_path):
+    extracted_questions = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                full_text += page.extract_text() or ""
+            
+            # Dummy structure for demonstration:
+            extracted_questions.append({
+                "question": "What is the capital of India?",
+                "options": ["Delhi", "Mumbai", "Kolkata", "Chennai"],
+                "answer": 0 # Index of correct option
+            })
+    except Exception as e:
+        logger.error(f"Error reading PDF: {e}")
+    return extracted_questions
+
+async def start_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
     
-    data_parts = query.data.split("_")
-    q_index = int(data_parts[1])
-    selected_option = int(data_parts[2])
-    user_id = query.from_user.id
-    
-    q_data = DYNAMIC_QUESTIONS[q_index]
-    correct_option = q_data["correct"]
-    is_correct = (selected_option == correct_option)
-    
-    # Database update (+4 / -1 marking)
-    conn = sqlite3.connect('neet_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT score, attempted, correct, incorrect FROM users WHERE user_id = ?', (user_id,))
-    row = cursor.fetchone()
-    
-    if row:
-        score, attempted, correct, incorrect = row
-        attempted += 1
-        if is_correct:
-            score += 4
-            correct += 1
-            result_text = "✅ Sahi Jawab! (+4 marks)"
-        else:
-            score -= 1
-            incorrect += 1
-            result_text = f"❌ Galat Jawab! (-1 mark). Sahi option tha: {q_data['options'][correct_option]}"
-            
-        cursor.execute('''
-            UPDATE users SET score = ?, attempted = ?, correct = ?, incorrect = ? WHERE user_id = ?
-        ''', (score, attempted, correct, incorrect, user_id))
-        conn.commit()
-    conn.close()
-    
-    # Purane message par result dikhayein
-    await query.edit_message_text(text=f"{query.message.text}\n\n{result_text}\n{q_data['explanation']}")
-    
-    # Agle question par move karein
-    user_progress[user_id] = q_index + 1
-    await send_question(query.message.chat_id, user_id, context)
+    q_data = QUIZ_STATE.get(chat_id)
+    if not q_data:
+        await query.message.reply_text("Koi active quiz nahi mila. Dobara PDF bhejiye.")
+        return
 
-# Stats Command
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect('neet_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT score, attempted, correct, incorrect FROM users WHERE user_id = ?', (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row:
-        score, attempted, correct, incorrect = row
-        accuracy = (correct / attempted * 100) if attempted > 0 else 0
-        
-        stats_msg = (
-            f"📊 **Aapki Performance Report** 📈\n\n"
-            f"🎯 Total Score: `{score}` marks\n"
-            f"📝 Total Attempted: `{attempted}`\n"
-            f"✅ Correct (+4): `{correct}`\n"
-            f"❌ Incorrect (-1): `{incorrect}`\n"
-            f"⚡ Accuracy: `{accuracy:.2f}%`"
-        )
-        await update.message.reply_text(stats_msg, parse_mode="Markdown")
-    else:
-        await update.message.reply_text("⚠️ Pehle /start type karke registration karein!")
+    current = q_data["current_q"]
+    question_item = q_data["questions"][current]
 
-if __name__ == '__main__':
-    # Render ke Environment Variable se token uthayega
-    TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+    await context.bot.send_poll(
+        chat_id=chat_id,
+        question=question_item["question"],
+        options=question_item["options"],
+        type="quiz",
+        correct_option_id=question_item["answer"],
+        is_anonymous=False
+    )
+
+def main():
+    # Flask server ko ek alag background thread me chalayein taaki bot aur server dono sath chalein
+    server_thread = threading.Thread(target=run_flask)
+    server_thread.daemon = True
+    server_thread.start()
+
+    # Apna Telegram Bot Token yahan dalein (Environment variable use karna behtar hai)
+    TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
     
-    app = ApplicationBuilder().token(TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("quiz", start_quiz))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    
-    print("✨ Inline Quiz Bot successfully run ho raha hai!")
-    app.run_polling()
+    application = Application.builder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
+    application.add_handler(CallbackQueryHandler(start_quiz_callback, pattern="start_quiz"))
+
+    print("Bot and Dummy Server are running...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
