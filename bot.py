@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import re
+import fitz  # PyMuPDF library for high-quality image cropping
 import pdfplumber
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -33,117 +34,86 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 # ---------------------------------------------
 
-SAVED_QUIZZES = {}  # {user_id: {quiz_name: [questions]}}
+SAVED_QUIZZES = {}  # {user_id: {quiz_name: {"questions": [...], "images": [...]}}}
 QUIZ_STATE = {}     # {chat_id: active_quiz_data}
-TEMP_PDF_DATA = {}  # {user_id: [questions]}
+TEMP_PDF_DATA = {}  # {user_id: data}
 
-def clean_text(text):
-    # Extra spaces, unwanted symbols ya year tags (jaise [2019], [2023-Manipur]) ko saaf karna
-    text = re.sub(r'\[\d{4}(?:-[a-zA-Z]+)?\]', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+def process_pdf_to_images_and_questions(pdf_path):
+    extracted_data = []
+    images_dir = "./quiz_images"
+    os.makedirs(images_dir, exist_ok=True)
 
-def extract_questions_from_pdf(pdf_path):
-    extracted_questions = []
     try:
+        # PyMuPDF (fitz) ka use karke PDF ko pages me load karna
+        doc = fitz.open(pdf_path)
+        
+        # Sath hi pdfplumber se text aur answer key nikalna
         with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
             for page in pdf.pages:
-                width = page.width
-                height = page.height
-                
-                # 2-Column layout parsing
-                left_box = (0, 0, width / 2, height)
-                left_text = page.crop(left_box).extract_text() or ""
-                
-                right_box = (width / 2, 0, width, height)
-                right_text = page.crop(right_box).extract_text() or ""
-                
-                full_text += left_text + "\n" + right_text + "\n"
+                full_text += (page.extract_text() or "") + "\n"
 
-            # Answer Key section alag karna
             answer_dict = {}
             ans_split = re.split(r'Answer Key', full_text, flags=re.IGNORECASE)
             main_text = ans_split[0]
             answer_text = ans_split[1] if len(ans_split) > 1 else ""
 
             ans_matches = re.findall(r'Q(\d+)\s*[\(\[]?([1-4])[\)\]]?', answer_text)
-            if not ans_matches:
-                ans_matches = re.findall(r'Q(\d+)\s*[:\-]?\s*[\(\[]?([1-4])[\)\]]?', full_text)
-
             for q_no, ans_opt in ans_matches:
                 answer_dict[int(q_no)] = int(ans_opt) - 1
 
-            # Questions blocks me todna
-            q_blocks = re.split(r'(?=Q\d+\s)', main_text)
+        # Har page par text blocks dhoondh kar questions extract karna aur image crop karna
+        q_counter = 1
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # PyMuPDF se text blocks nikalna
+            blocks = page.get_text("blocks")
+            # Blocks ko vertical/horizontal order me sort karna
+            blocks.sort(key=lambda b: (b[1], b[0]))
 
-            for block in q_blocks:
-                block = block.strip()
-                if not block.startswith('Q'):
-                    continue
-                
-                q_num_match = re.match(r'Q(\d+)', block)
-                if not q_num_match:
-                    continue
-                q_no = int(q_num_match.group(1))
+            for b in blocks:
+                block_text = b[4]
+                if block_text.strip().startswith("Q") or re.search(r'Q\d+', block_text):
+                    # Question ka text clean karna
+                    q_text_clean = re.sub(r'\[\d{4}.*?\]', '', block_text).strip()
+                    
+                    # Options extract karne ke liye choti regex
+                    options = ["Option 1", "Option 2", "Option 3", "Option 4"] # Default fallback
+                    
+                    # Image crop coordinates (x0, y0, x1, y1)
+                    rect = fitz.Rect(b[0], b[1], b[2], b[3])
+                    pix = page.get_pixmap(clip=rect, dpi=150) # High quality crop
+                    img_path = os.path.join(images_dir, f"q_{q_counter}_{time.time()}.png")
+                    pix.save(img_path)
 
-                # Options (1), (2), (3), (4) ko alag karne ke liye regex split
-                # Yeh ensure karega ki 2 options ek me na judein
-                option_pattern = re.compile(r'[\(\[]([1-4])[\)\]]\s*')
-                parts = option_pattern.split(block)
-                
-                # parts[0] question text hoga, aur uske baad [opt_num, opt_text, opt_num, opt_text...] honge
-                q_raw_text = parts[0]
-                q_text = clean_text(re.sub(r'^Q\d+\s*', '', q_raw_text))
-
-                options = []
-                # Parts ko 2-step jump karke options nikalna
-                i = 1
-                while i < len(parts) - 1:
-                    opt_text = clean_text(parts[i+1])
-                    if opt_text:
-                        options.append(opt_text)
-                    i += 2
-
-                # Agar options 4 se zyada ya kam ho ya kuch galti ho toh fallback check
-                if len(options) >= 4:
-                    options = options[:4]
-
-                if q_text and len(options) >= 2:
-                    correct_idx = answer_dict.get(q_no, 0)
-                    extracted_questions.append({
-                        "id": q_no,
-                        "question": q_text,
-                        "options": options,
+                    correct_idx = answer_dict.get(q_counter, 0)
+                    extracted_data.append({
+                        "id": q_counter,
+                        "image_path": img_path,
+                        "options": ["Option (1)", "Option (2)", "Option (3)", "Option (4)"], # Ya text options
                         "answer": correct_idx
                     })
-    except Exception as e:
-        logger.error(f"Error parsing 2-column PDF: {e}")
+                    q_counter += 1
 
-    return extracted_questions
+    except Exception as e:
+        logger.error(f"Error processing PDF images: {e}")
+
+    return extracted_data
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "🌟 **Welcome to Ultimate Quiz Bot!** 🌟\n\n"
-        "Aap apne study PDFs yahan bhejiye, aur main unse ek shandar interactive quiz taiyar kar dunga.\n\n"
+        "Aap apni study PDFs yahan bhejiye. Main har question ki **saaf image** crop karke ek professional visual quiz taiyar kar dunga!\n\n"
         "📌 **Quick Guide:**\n"
-        "• **PDF bhejiye** - Naya quiz banane ke liye\n"
-        "• `/savequiz <Name>` - PDF ke baad quiz save karne ke liye\n"
-        "• `/myquizzes` - Apne save kiye gaye quizzes khelne ke liye\n"
-        "• `/stop` - Chal rahe quiz ko rokne ke liye"
+        "• **PDF bhejiye** - Naya visual quiz banane ke liye\n"
+        "• `/savequiz <Name>` - Quiz save karne ke liye\n"
+        "• `/myquizzes` - Saved quizzes khelne ke liye\n"
+        "• `/stop` - Quiz rokne ke liye"
     )
-    keyboard = [
-        [KeyboardButton("📚 My Saved Quizzes"), KeyboardButton("❓ Help")]
-    ]
+    keyboard = [[KeyboardButton("📚 My Saved Quizzes"), KeyboardButton("❓ Help")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "📚 My Saved Quizzes":
-        await list_saved_quizzes(update, context)
-    elif text == "❓ Help":
-        await start(update, context)
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
@@ -151,36 +121,36 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Kripya ek valid PDF file bhejiye.")
         return
 
-    msg = await update.message.reply_text("📥 PDF scan ho rahi hai (Extra years aur merged options clean kiye ja rahe hain)...")
+    msg = await update.message.reply_text("🖼️ PDF scan ho rahi hai aur har question ki high-quality images crop ki ja rahi hain...")
     
     file = await context.bot.get_file(document.file_id)
     file_path = f"./{document.file_name}"
     await file.download_to_drive(file_path)
 
-    questions = extract_questions_from_pdf(file_path)
+    questions = process_pdf_to_images_and_questions(file_path)
     
     if not questions:
-        await msg.edit_text("❌ PDF se questions extract nahi ho paye. Kripya format check karein.")
+        await msg.edit_text("❌ PDF se questions crop nahi ho paye.")
         return
 
     user_id = update.effective_user.id
     TEMP_PDF_DATA[user_id] = questions
 
     await msg.edit_text(
-        f"✅ **Success!** Total `{len(questions)}` questions bilkul clean tarike se scan ho gaye hain.\n\n"
+        f"✅ **Success!** Total `{len(questions)}` questions ki images crop ho chuki hain.\n\n"
         "Ab is quiz ko save karne ke liye yeh command bhejiye:\n"
-        "`/savequiz Quiz_Name` ( Jaise: `/savequiz Chemistry_Ch1` )",
+        "`/savequiz Quiz_Name`",
         parse_mode="Markdown"
     )
 
 async def save_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in TEMP_PDF_DATA:
-        await update.message.reply_text("⚠️ Pehle koi PDF bhejiye jiska quiz banana ho!")
+        await update.message.reply_text("⚠️ Pehle koi PDF bhejiye!")
         return
 
     if not context.args:
-        await update.message.reply_text("⚠️ Kripya quiz ka naam dein. Example: `/savequiz Chemistry_Ch1`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Kripya quiz ka naam dein. Example: `/savequiz Chemistry_Visual`", parse_mode="Markdown")
         return
 
     quiz_name = "_".join(context.args)
@@ -194,7 +164,7 @@ async def save_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"🎉 Quiz **'{quiz_name}'** safaltapoorvak save ho gaya hai!",
+        f"🎉 Visual Quiz **'{quiz_name}'** safaltapoorvak save ho gaya hai!",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -204,7 +174,7 @@ async def list_saved_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE)
     quizzes = SAVED_QUIZZES.get(user_id, {})
 
     if not quizzes:
-        await update.message.reply_text("📭 Aapne abhi tak koi quiz save nahi kiya hai. Ek PDF bhejiye aur save karein!")
+        await update.message.reply_text("📭 Aapne abhi tak koi quiz save nahi kiya hai.")
         return
 
     keyboard = []
@@ -212,7 +182,7 @@ async def list_saved_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard.append([InlineKeyboardButton(f"📖 {q_name}", callback_data=f"start_saved_{q_name}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("📂 **Aapke Saved Quizzes:**\nKhelne ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text("📂 **Aapke Saved Visual Quizzes:**", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start_saved_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -236,16 +206,16 @@ async def start_saved_quiz_callback(update: Update, context: ContextTypes.DEFAUL
         "active": True
     }
 
-    await query.message.reply_text(f"🚀 Quiz **'{quiz_name}'** shuru ho raha hai! Tayar ho jaiye.", parse_mode="Markdown")
+    await query.message.reply_text(f"🚀 Visual Quiz **'{quiz_name}'** shuru ho raha hai!", parse_mode="Markdown")
     await send_question(chat_id, context)
 
 async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in QUIZ_STATE and QUIZ_STATE[chat_id]["active"]:
         QUIZ_STATE[chat_id]["active"] = False
-        await update.message.reply_text("🛑 Active quiz ko rok diya gaya hai.")
+        await update.message.reply_text("🛑 Quiz rok diya gaya hai.")
     else:
-        await update.message.reply_text("⚠️ Yahan koi active quiz nahi chal raha hai.")
+        await update.message.reply_text("⚠️ Yahan koi active quiz nahi hai.")
 
 async def send_question(chat_id, context):
     q_data = QUIZ_STATE.get(chat_id)
@@ -260,20 +230,28 @@ async def send_question(chat_id, context):
         return
 
     q = questions[idx]
-    keyboard = []
-    for i, opt in enumerate(q["options"]):
-        keyboard.append([InlineKeyboardButton(f"({i+1}) {opt}", callback_data=f"ans_{idx}_{i}")])
-    
-    keyboard.append([InlineKeyboardButton("👤 Check My Status", callback_data=f"status_{chat_id}")])
+    keyboard = [
+        [
+            InlineKeyboardButton("(1)", callback_data=f"ans_{idx}_0"),
+            InlineKeyboardButton("(2)", callback_data=f"ans_{idx}_1"),
+            InlineKeyboardButton("(3)", callback_data=f"ans_{idx}_2"),
+            InlineKeyboardButton("(4)", callback_data=f"ans_{idx}_3")
+        ],
+        [InlineKeyboardButton("👤 Check My Status", callback_data=f"status_{chat_id}")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    msg = (
-        f"🎯 **Quiz: {q_data['quiz_name']}**\n"
-        f"📋 **Question {idx+1} / {len(questions)}**\n\n"
-        f"_{q['question']}_\n"
-    )
     q_data["question_start_time"] = time.time()
-    await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=reply_markup, parse_mode="Markdown")
+    
+    # Text ke bajay image bhejna
+    with open(q["image_path"], "rb") as photo:
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            caption=f"🎯 **Quiz: {q_data['quiz_name']}** | Question {idx+1}/{len(questions)}",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
 async def answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -289,7 +267,7 @@ async def answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q_data = QUIZ_STATE.get(chat_id)
     if not q_data or not q_data["active"]:
-        await query.answer("⚠️ Yeh quiz ab active nahi hai!", show_alert=True)
+        await query.answer("⚠️ Yeh quiz active nahi hai!", show_alert=True)
         return
 
     questions = q_data["questions"]
@@ -309,11 +287,11 @@ async def answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if selected_opt == correct_opt:
         user_record["score"] += 4
         user_record["correct"] += 1
-        await query.answer("✨ Sahi jawab! (+4 marks)", show_alert=False)
+        await query.answer("✨ Sahi jawab! (+4)", show_alert=False)
     else:
         user_record["score"] -= 1
         user_record["incorrect"] += 1
-        await query.answer("❌ Galat jawab! (-1 mark)", show_alert=False)
+        await query.answer("❌ Galat jawab! (-1)", show_alert=False)
 
     q_data["current_q"] += 1
 
@@ -333,7 +311,7 @@ async def show_leaderboard(chat_id, context):
     scores = q_data["scores"]
 
     if not scores:
-        await context.bot.send_message(chat_id=chat_id, text="📊 Kisi ne bhi quiz attempt nahi kiya.")
+        await context.bot.send_message(chat_id=chat_id, text="📊 Kisi ne attempt nahi kiya.")
         return
 
     sorted_users = sorted(
@@ -360,23 +338,22 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     q_data = QUIZ_STATE.get(chat_id)
     if not q_data:
-        await query.answer("⚠️ Koi active quiz data nahi mila.", show_alert=True)
+        await query.answer("⚠️ Koi data nahi mila.", show_alert=True)
         return
 
     user_record = q_data["scores"].get(user_id)
     if not user_record:
-        await query.answer("⚠️ Aapne is quiz me participate nahi kiya hai!", show_alert=True)
+        await query.answer("⚠️ Aapne participate nahi kiya!", show_alert=True)
         return
 
     avg_time = sum(user_record["times"]) / len(user_record["times"]) if user_record["times"] else 0
     
     status_msg = (
-        f"📊 Aapka Personal Status:\n\n"
-        f"👤 Naam: {user_record['name']}\n"
-        f"🎯 Total Score: {user_record['score']}\n"
-        f"✅ Sahi Jawab: {user_record['correct']}\n"
-        f"❌ Galat Jawab: {user_record['incorrect']}\n"
-        f"⏱️ Average Time: {avg_time:.2f}s"
+        f"📊 Aapka Status:\n"
+        f"👤 {user_record['name']}\n"
+        f"🎯 Score: {user_record['score']}\n"
+        f"✅ Sahi: {user_record['correct']} | ❌ Galat: {user_record['incorrect']}\n"
+        f"⏱️ Avg Time: {avg_time:.2f}s"
     )
     await query.answer(status_msg, show_alert=True)
 
@@ -399,7 +376,7 @@ def main():
     application.add_handler(CallbackQueryHandler(answer_callback, pattern="^ans_"))
     application.add_handler(CallbackQueryHandler(status_callback, pattern="^(status_|global_status_)"))
 
-    print("Bot is running with advanced PDF cleaning...")
+    print("Visual Quiz Bot is running with image cropping...")
     application.run_polling()
 
 if __name__ == "__main__":
