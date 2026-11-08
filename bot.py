@@ -198,8 +198,7 @@ async def list_saved_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard.append([InlineKeyboardButton(f"📖 {q_name}", callback_data=f"start_saved_{q_name}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("📂 Aapke Saved Quizzes:\n
-         Start karne ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text("📂 Aapke Saved Quizzes:\nStart karne ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start_saved_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
