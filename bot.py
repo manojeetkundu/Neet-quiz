@@ -33,10 +33,15 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 # ---------------------------------------------
 
-# Storage for Saved Quizzes & Active Quiz States
 SAVED_QUIZZES = {}  # {user_id: {quiz_name: [questions]}}
 QUIZ_STATE = {}     # {chat_id: active_quiz_data}
 TEMP_PDF_DATA = {}  # {user_id: [questions]}
+
+def clean_text(text):
+    # Extra spaces, unwanted symbols ya year tags (jaise [2019], [2023-Manipur]) ko saaf karna
+    text = re.sub(r'\[\d{4}(?:-[a-zA-Z]+)?\]', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def extract_questions_from_pdf(pdf_path):
     extracted_questions = []
@@ -44,10 +49,10 @@ def extract_questions_from_pdf(pdf_path):
         with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
             for page in pdf.pages:
-                # 2-Column layout handle karne ke liye page ko left aur right half me crop karna
                 width = page.width
                 height = page.height
                 
+                # 2-Column layout parsing
                 left_box = (0, 0, width / 2, height)
                 left_text = page.crop(left_box).extract_text() or ""
                 
@@ -69,6 +74,7 @@ def extract_questions_from_pdf(pdf_path):
             for q_no, ans_opt in ans_matches:
                 answer_dict[int(q_no)] = int(ans_opt) - 1
 
+            # Questions blocks me todna
             q_blocks = re.split(r'(?=Q\d+\s)', main_text)
 
             for block in q_blocks:
@@ -81,27 +87,34 @@ def extract_questions_from_pdf(pdf_path):
                     continue
                 q_no = int(q_num_match.group(1))
 
-                lines = block.split('\n')
-                q_lines = []
+                # Options (1), (2), (3), (4) ko alag karne ke liye regex split
+                # Yeh ensure karega ki 2 options ek me na judein
+                option_pattern = re.compile(r'[\(\[]([1-4])[\)\]]\s*')
+                parts = option_pattern.split(block)
+                
+                # parts[0] question text hoga, aur uske baad [opt_num, opt_text, opt_num, opt_text...] honge
+                q_raw_text = parts[0]
+                q_text = clean_text(re.sub(r'^Q\d+\s*', '', q_raw_text))
+
                 options = []
+                # Parts ko 2-step jump karke options nikalna
+                i = 1
+                while i < len(parts) - 1:
+                    opt_text = clean_text(parts[i+1])
+                    if opt_text:
+                        options.append(opt_text)
+                    i += 2
 
-                for line in lines:
-                    opt_match = re.match(r'^\s*[\(\[]([1-4])[\)\]]\s*(.*)', line)
-                    if opt_match:
-                        options.append(opt_match.group(2).strip())
-                    else:
-                        if not re.match(r'^Q\d+', line):
-                            q_lines.append(line)
-
-                q_text = " ".join(q_lines).strip()
-                q_text = re.sub(r'^Q\d+\s*', '', q_text)
+                # Agar options 4 se zyada ya kam ho ya kuch galti ho toh fallback check
+                if len(options) >= 4:
+                    options = options[:4]
 
                 if q_text and len(options) >= 2:
                     correct_idx = answer_dict.get(q_no, 0)
                     extracted_questions.append({
                         "id": q_no,
                         "question": q_text,
-                        "options": options[:4],
+                        "options": options,
                         "answer": correct_idx
                     })
     except Exception as e:
@@ -111,12 +124,13 @@ def extract_questions_from_pdf(pdf_path):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🌟 Welcome to Ultimate Quiz Bot! 🌟\n\n"
+        "🌟 **Welcome to Ultimate Quiz Bot!** 🌟\n\n"
         "Aap apne study PDFs yahan bhejiye, aur main unse ek shandar interactive quiz taiyar kar dunga.\n\n"
-        "📌 Quick Guide:\n"
-        "• PDF bhejiye - Naya quiz banane ke liye\n"
-        "• /myquizzes - Apne save kiye gaye quizzes start ke liye\n"
-        "• /stop - Chal rahe quiz ko rokne ke liye"
+        "📌 **Quick Guide:**\n"
+        "• **PDF bhejiye** - Naya quiz banane ke liye\n"
+        "• `/savequiz <Name>` - PDF ke baad quiz save karne ke liye\n"
+        "• `/myquizzes` - Apne save kiye gaye quizzes khelne ke liye\n"
+        "• `/stop` - Chal rahe quiz ko rokne ke liye"
     )
     keyboard = [
         [KeyboardButton("📚 My Saved Quizzes"), KeyboardButton("❓ Help")]
@@ -137,7 +151,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Kripya ek valid PDF file bhejiye.")
         return
 
-    msg = await update.message.reply_text("📥 PDF scan ho rahi hai (2-Column layout process ho raha hai)...")
+    msg = await update.message.reply_text("📥 PDF scan ho rahi hai (Extra years aur merged options clean kiye ja rahe hain)...")
     
     file = await context.bot.get_file(document.file_id)
     file_path = f"./{document.file_name}"
@@ -153,7 +167,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     TEMP_PDF_DATA[user_id] = questions
 
     await msg.edit_text(
-        f"✅ Success! Total `{len(questions)}` questions sahi tarike se scan ho gaye hain.\n\n"
+        f"✅ **Success!** Total `{len(questions)}` questions bilkul clean tarike se scan ho gaye hain.\n\n"
         "Ab is quiz ko save karne ke liye yeh command bhejiye:\n"
         "`/savequiz Quiz_Name` ( Jaise: `/savequiz Chemistry_Ch1` )",
         parse_mode="Markdown"
@@ -180,7 +194,7 @@ async def save_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"🎉 Quiz '{quiz_name}' Successfully save ho gaya hai!✅",
+        f"🎉 Quiz **'{quiz_name}'** safaltapoorvak save ho gaya hai!",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -198,7 +212,7 @@ async def list_saved_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard.append([InlineKeyboardButton(f"📖 {q_name}", callback_data=f"start_saved_{q_name}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("📂 Aapke Saved Quizzes:\nStart karne ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text("📂 **Aapke Saved Quizzes:**\nKhelne ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start_saved_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -222,7 +236,7 @@ async def start_saved_quiz_callback(update: Update, context: ContextTypes.DEFAUL
         "active": True
     }
 
-    await query.message.reply_text(f"🚀 Quiz '{quiz_name}' shuru ho raha hai! Get Ready. ", parse_mode="Markdown")
+    await query.message.reply_text(f"🚀 Quiz **'{quiz_name}'** shuru ho raha hai! Tayar ho jaiye.", parse_mode="Markdown")
     await send_question(chat_id, context)
 
 async def stop_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,8 +268,8 @@ async def send_question(chat_id, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     msg = (
-        f"🎯 Quiz: {q_data['quiz_name']}\n"
-        f"📋 Question {idx+1} / {len(questions)}\n\n"
+        f"🎯 **Quiz: {q_data['quiz_name']}**\n"
+        f"📋 **Question {idx+1} / {len(questions)}**\n\n"
         f"_{q['question']}_\n"
     )
     q_data["question_start_time"] = time.time()
@@ -328,11 +342,11 @@ async def show_leaderboard(chat_id, context):
         reverse=True
     )
 
-    leaderboard_text = f"🏆 Leaderboard: {q_data['quiz_name']} 🏆\n\n"
+    leaderboard_text = f"🏆 **Leaderboard: {q_data['quiz_name']}** 🏆\n\n"
     for rank, u in enumerate(sorted_users, 1):
         avg_time = sum(u["times"]) / len(u["times"]) if u["times"] else 0
         medal = "🥇" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else f"{rank}."
-        leaderboard_text += f"{medal} {u['name']} — Score: `{u['score']}` | Avg Time: `{avg_time:.2f}s`\n"
+        leaderboard_text += f"{medal} **{u['name']}** — Score: `{u['score']}` | Avg Time: `{avg_time:.2f}s`\n"
 
     keyboard = [[InlineKeyboardButton("📊 Check Personal Status", callback_data=f"global_status_{chat_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -385,7 +399,7 @@ def main():
     application.add_handler(CallbackQueryHandler(answer_callback, pattern="^ans_"))
     application.add_handler(CallbackQueryHandler(status_callback, pattern="^(status_|global_status_)"))
 
-    print("Bot and Dummy Server are running perfectly...")
+    print("Bot is running with advanced PDF cleaning...")
     application.run_polling()
 
 if __name__ == "__main__":
