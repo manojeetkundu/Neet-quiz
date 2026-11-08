@@ -3,7 +3,7 @@ import os
 import threading
 import time
 import re
-import fitz  # PyMuPDF library for high-quality image cropping
+import pymupdf  # PyMuPDF library for high-quality image cropping
 import pdfplumber
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -381,7 +381,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "📚 My Saved Quizzes":
         await list_saved_quizzes(update, context)
