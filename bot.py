@@ -381,3 +381,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "📚 My Saved Quizzes":
+        await list_saved_quizzes(update, context)
+    elif text == "❓ Help":
+        await start(update, context)
