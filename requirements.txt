@@ -1,2 +1,4 @@
-python-telegram-bot==20.7
-pypdf==4.0.0
+python-telegram-bot
+pdfplumber
+flask
+pandas
