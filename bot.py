@@ -28,7 +28,7 @@ QUIZ_STATE = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Namaste! Mujhe ek PDF bhejiye jisme questions aur unke answers hon, taaki mai ek quiz create kar saku."
+        "Namaste! {user.firstname} Quiz Karna hai? to der kis baat ki! Mujhe ek PDF bhejiye jisme questions aur unke answers hon, mai quiz create kar deta hu."
     )
 
 # PDF Handle karne ka function
@@ -60,22 +60,84 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(f"Total {len(questions)} questions mil gaye hain!", reply_markup=reply_markup)
 
+import re
+
 def extract_questions_from_pdf(pdf_path):
     extracted_questions = []
     try:
         with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
+            # Saare pages ka text collect karein
             for page in pdf.pages:
-                full_text += page.extract_text() or ""
+                text = page.extract_text()
+                if text:
+                    full_text += text + "\n"
+
+            # 1. Questions aur Answers section ko alag karne ki koshish
+            # Aam taur par answer key 'Answer Key', 'Answers', ya last ke pages par hoti hai
+            answer_dict = {}
+            answer_split_pattern = re.compile(r'(?:Answer Key|Answers|Solutions).*', re.IGNORECASE | re.DOTALL)
+            split_match = answer_split_pattern.search(full_text)
             
-            # Dummy structure for demonstration:
-            extracted_questions.append({
-                "question": "What is the capital of India?",
-                "options": ["Delhi", "Mumbai", "Kolkata", "Chennai"],
-                "answer": 0 # Index of correct option
-            })
+            main_text = full_text
+            answer_text = ""
+            
+            if split_match:
+                # Agar answer section mil gaya, toh use alag kar lo
+                main_text = full_text[:split_match.start()]
+                answer_text = full_text[split_match.start():]
+                
+                # Answer key se mapping banana (jaise Q1 -> A, Q2 -> B)
+                # Matches patterns like "1. A" ya "Q1: B" ya "1) C"
+                ans_matches = re.findall(r'(\d+)[).\s:]+([A-Da-d])', answer_text)
+                for q_no, ans in ans_matches:
+                    # A=0, B=1, C=2, D=3 index map karna
+                    ans_idx = ord(ans.upper()) - ord('A')
+                    answer_dict[int(q_no)] = ans_idx
+
+            # 2. Questions aur Options extract karna
+            # Maankar chal rahe hain ki questions "1.", "2." se shuru hote hain
+            question_blocks = re.split(r'\n(?=\s*\d+\.\s)', main_text)
+            
+            q_counter = 1
+            for block in question_blocks:
+                block = block.strip()
+                if not block:
+                    continue
+                
+                # Options (A), (B), (C), (D) ya (a), (b), (c), (d) ko dhoondhna
+                lines = block.split('\n')
+                q_lines = []
+                options = []
+                
+                for line in lines:
+                    # Agar line option se shuru hoti hai toh options list me daalein
+                    if re.match(r'^\s*[\(\[]?[A-Da-d][\)\]\.]', line):
+                        # Option letter hata kar sirf text rakhna
+                        clean_opt = re.sub(r'^\s*[\(\[]?[A-Da-d][\)\]\.]\s*', '', line)
+                        options.append(clean_opt)
+                    else:
+                        q_lines.append(line)
+                
+                q_text = " ".join(q_lines).strip()
+                # Agar regex se options alag nahi hue toh fallback options
+                if len(options) < 2:
+                    options = ["Option A", "Option B", "Option C", "Option D"]
+                
+                # Agar answer key me is question ka answer hai toh woh use karo, warna default 0
+                correct_ans_idx = answer_dict.get(q_counter, 0)
+                
+                if q_text:
+                    extracted_questions.append({
+                        "question": q_text,
+                        "options": options[:4], # Sirf pehle 4 options rakhein
+                        "answer": correct_ans_idx
+                    })
+                    q_counter += 1
+
     except Exception as e:
-        logger.error(f"Error reading PDF: {e}")
+        print(f"Error parsing PDF: {e}")
+        
     return extracted_questions
 
 async def start_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
