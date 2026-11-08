@@ -44,10 +44,19 @@ def extract_questions_from_pdf(pdf_path):
         with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
             for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    full_text += text + "\n"
+                # 2-Column layout handle karne ke liye page ko left aur right half me crop karna
+                width = page.width
+                height = page.height
+                
+                left_box = (0, 0, width / 2, height)
+                left_text = page.crop(left_box).extract_text() or ""
+                
+                right_box = (width / 2, 0, width, height)
+                right_text = page.crop(right_box).extract_text() or ""
+                
+                full_text += left_text + "\n" + right_text + "\n"
 
+            # Answer Key section alag karna
             answer_dict = {}
             ans_split = re.split(r'Answer Key', full_text, flags=re.IGNORECASE)
             main_text = ans_split[0]
@@ -96,18 +105,18 @@ def extract_questions_from_pdf(pdf_path):
                         "answer": correct_idx
                     })
     except Exception as e:
-        logger.error(f"Error parsing PDF: {e}")
+        logger.error(f"Error parsing 2-column PDF: {e}")
 
     return extracted_questions
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🌟 Welcome to NEET Quiz Bot! 🌟\n\n"
+        "🌟 Welcome to Ultimate Quiz Bot! 🌟\n\n"
         "Aap apne study PDFs yahan bhejiye, aur main unse ek shandar interactive quiz taiyar kar dunga.\n\n"
-        "📌 Commands Guide:\n"
+        "📌 Quick Guide:\n"
         "• PDF bhejiye - Naya quiz banane ke liye\n"
-        "• /myquizzes - Apne save kiye gaye quizzes dekhne aur start karne ke liye\n"
-        "• /stop - Chal rahe quiz ko beech me rokne ke liye"
+        "• /myquizzes - Apne save kiye gaye quizzes start ke liye\n"
+        "• /stop - Chal rahe quiz ko rokne ke liye"
     )
     keyboard = [
         [KeyboardButton("📚 My Saved Quizzes"), KeyboardButton("❓ Help")]
@@ -128,7 +137,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Kripya ek valid PDF file bhejiye.")
         return
 
-    msg = await update.message.reply_text("📥 PDF download ho rahi hai aur questions extract kiye ja rahe hain...")
+    msg = await update.message.reply_text("📥 PDF scan ho rahi hai (2-Column layout process ho raha hai)...")
     
     file = await context.bot.get_file(document.file_id)
     file_path = f"./{document.file_name}"
@@ -144,10 +153,10 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     TEMP_PDF_DATA[user_id] = questions
 
     await msg.edit_text(
-        f"✅ Success! Total `{len(questions)}` questions mil gaye hain.\n\n"
-        "Ab is quiz ke liye ek Title dijiye.\n"
-        "Save the Quiz: `/savequiz <Quiz_Name>`\n"
-        "Example: `/savequiz Solution_Chemistry`"
+        f"✅ Success! Total `{len(questions)}` questions sahi tarike se scan ho gaye hain.\n\n"
+        "Ab is quiz ko save karne ke liye yeh command bhejiye:\n"
+        "`/savequiz Quiz_Name` ( Jaise: `/savequiz Chemistry_Ch1` )",
+        parse_mode="Markdown"
     )
 
 async def save_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,7 +180,7 @@ async def save_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"🎉 Quiz '{quiz_name}' successfully save ho gaya hai! ✅",
+        f"🎉 Quiz '{quiz_name}' Successfully save ho gaya hai!✅",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -189,7 +198,8 @@ async def list_saved_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard.append([InlineKeyboardButton(f"📖 {q_name}", callback_data=f"start_saved_{q_name}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("📂 Aapke Saved Quizzes:\nQuiz ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
+    await update.message.reply_text("📂 Aapke Saved Quizzes:\n
+         Start karne ke liye niche diye gaye quiz par click karein:", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def start_saved_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -376,7 +386,7 @@ def main():
     application.add_handler(CallbackQueryHandler(answer_callback, pattern="^ans_"))
     application.add_handler(CallbackQueryHandler(status_callback, pattern="^(status_|global_status_)"))
 
-    print("Bot and Dummy Server are running with enhanced features...")
+    print("Bot and Dummy Server are running perfectly...")
     application.run_polling()
 
 if __name__ == "__main__":
